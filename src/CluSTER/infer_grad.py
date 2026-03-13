@@ -1,20 +1,27 @@
 from dataclasses import dataclass, field
 from typing import cast
+from typing import Dict, Optional, Sequence, List
 
+import transformers
 import torch
 from datasets import load_dataset
 from transformers import HfArgumentParser, Trainer, TrainingArguments
 
-from magicoder.llm_wrapper import (
+from CluSTER.llm_wrapper import (
     DecodingConfig,
     EncodingConfig,
     TokenizationContext,
     get_model_context,
     pad_sequences,
 )
-from magicoder.prompt_template import MAGICODER_PROMPT
-from magicoder.utils import N_CORES
+from CluSTER.prompt_template import MAGICODER_PROMPT
+from CluSTER.utils import N_CORES
+import random
+import numpy as np
+from CluSTER.coreset_trainer import CustomTrainer
+from CluSTER.grad_gen_call_back import SamplerEpochSetterCallback, PruneAndClusteringinwithMeanCallback, UniformCallback
 
+import time
 
 @dataclass(frozen=True)
 class ModelArguments:
@@ -24,6 +31,13 @@ class ModelArguments:
 
 # Ignored index in CrossEntropyLoss
 IGNORED_INDEX = -100
+
+
+def seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def map_dataset(
@@ -118,6 +132,37 @@ def get_data_collator(args: "Args", pad_token_id: int):
 
     return collate
 
+@dataclass
+class TrainingArguments(transformers.TrainingArguments):
+    cache_dir: Optional[str] = field(default=None)
+    optim: str = field(default="adafactor")
+    prune: Optional[str] = field(default="close", metadata={"help": "Type of the Pruner to use."})
+    sampling_type: Optional[str] = field(default="interleaved", metadata={"help": "Type of the Sampler to use."})
+    weight: bool = field(default=True, metadata={"help": "Whether to use weights in coreset selection."})
+    cluster_sizes: List[int] = field(
+        default_factory=lambda: [1,1,1,1],
+        metadata={"help": "Integers for cluster sizes."}
+    )
+    seed: Optional[int] = field(default = 42, metadata={"help": "seed"})
+    ratio: Optional[int] = field(default = 100, metadata={"help": "ratio for coreset selection"})
+    badge_batch: Optional[int] = field(default = 4, metadata={"help": "batch size for badge"})
+    badge_forward_chunk_mult: Optional[int] = field(
+        default=1,
+        metadata={"help": "Multiplier for per-forward BADGE micro-chunk size (higher=faster, more memory)."},
+    )
+    badge_cleanup_interval: Optional[int] = field(
+        default=0,
+        metadata={"help": "Run expensive CUDA cache cleanup every N BADGE sub-batches (0 disables)."},
+    )
+    weight_mode: Optional[str] = field(default="inv")
+    save_badge_grads: bool = field(
+        default=False,
+        metadata={"help": "Whether to save BADGE gradient tensors computed in callback."},
+    )
+    badge_grad_save_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Directory to save BADGE gradient tensors. Defaults to <output_dir>/badge_grads."},
+    )
 
 @dataclass(frozen=True)
 class Args:
@@ -128,6 +173,7 @@ class Args:
         default=0.05, metadata={"help": "0--1 means ratio, >1 means number of examples"}
     )
     use_flash_attention: bool = field(default=False)
+    uniform: bool = field(default=False, metadata={"help": "Whether to use uniform sampling instead of coreset selection."})
 
 
 def train():
@@ -136,6 +182,7 @@ def train():
         tuple[ModelArguments, TrainingArguments, Args],
         parser.parse_args_into_dataclasses(),
     )
+    seed_everything(training_args.seed)
     dataset = load_dataset("json", data_files=args.datafile_paths, split="train")
 
     model_key = model_args.model_key
@@ -161,7 +208,7 @@ def train():
     #     train_dataset = dataset
 
     # Shuffling
-    if training_args.eval_steps is None and training_args.evaluation_strategy == "no":
+    if training_args.eval_steps is None and training_args.eval_strategy == "no": ##0219 edit
         train_dataset = train_dataset.shuffle(seed=training_args.seed)
         eval_dataset = None
     else:
@@ -186,15 +233,52 @@ def train():
     data_collator = get_data_collator(args, state.tokenization_context.pad_token_id)
 
     # neftune_noise_alpha
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=state.model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
+        tokenizer=state.tokenization_context.tokenizer,
         # eval_dataset=small_eval_dataset,
         # compute_metrics=compute_metrics,
     )
+    print("Using precomputed gradient-based ordering before trainer.train()")
+    trainer.add_callback(SamplerEpochSetterCallback(trainer))
+
+    if args.uniform:
+        print("Building UniformCallback for one-time precompute")
+        precompute_callback = UniformCallback(
+            trainer,
+            dataset=trainer.train_dataset,
+            tokenizer=tokenization_context.tokenizer,
+        )
+    else:
+        print("Building PruneAndClusteringinwithMeanCallback for one-time precompute")
+        precompute_callback = PruneAndClusteringinwithMeanCallback(
+            trainer,
+            dataset=trainer.train_dataset,
+            tokenizer=tokenization_context.tokenizer,
+        )
+
+    start = time.time()
+    # Ensure trainer has initialized sampler object referenced by the callback.
+    trainer.get_train_dataloader()
+
+    # Trigger the callback pipeline once before training starts.
+    if trainer.state.epoch is None:
+        trainer.state.epoch = 0.0
+    start1 = time.time()
+    precompute_callback.on_train_begin(
+        training_args,
+        trainer.state,
+        trainer.control,
+        model=trainer.model,
+    )
+    end = time.time()
+    print("Finished one-time BADGE precompute and sampler ordering in time: ", end-start)
+
+    print("From dataloader to one-time BADGE precompute and sampler ordering in time: ", end-start1)
 
     # NOTE: the checkpoint will override the initialized model
     trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)

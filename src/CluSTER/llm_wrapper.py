@@ -413,7 +413,7 @@ def get_model_context(
     if inference_mode:
         other_kwargs["device_map"] = "auto"
     if use_flash_attention:
-        other_kwargs["use_flash_attention_2"] = True
+        other_kwargs["attn_implementation"] = "flash_attention_2"
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         torch_dtype=dtype,
@@ -456,8 +456,6 @@ def create_infilling_prompt(
     suffix: str,
     tokenizer: PreTrainedTokenizer | None = None,
 ) -> str:
-    """TODO: how to separate magicoder from the others (magicoder now has a base
-    model key. Consider change it?)"""
     if model_key in SupportedModelKeys.starcoder_based_models():
         return form_starcoder_infill(prefix, suffix)
     elif (

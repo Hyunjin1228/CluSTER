@@ -4,8 +4,8 @@ from typing import Literal, cast
 from datasets import load_dataset
 from transformers import HfArgumentParser
 
-from magicoder.prompt_template import SRC_INSTRUCT_INSTRUCTION_PROMPT
-from magicoder.utils import N_CORES, read_jsonl, write_jsonl
+from CluSTER.prompt_template import SRC_INSTRUCT_INSTRUCTION_PROMPT
+from CluSTER.utils import N_CORES, read_jsonl, write_jsonl
 
 DatasetKey = Literal["evol-instruct", "codealpaca", "src-instruct", "combine"]
 

@@ -25,7 +25,7 @@ from itertools import tee
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple, cast
 
-from magicoder.utils import write_jsonl
+from CluSTER.utils import write_jsonl
 
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=FutureWarning)

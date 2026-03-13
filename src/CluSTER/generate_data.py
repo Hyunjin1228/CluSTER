@@ -8,7 +8,7 @@ from datasets import Dataset, load_dataset
 from tqdm.auto import tqdm
 from transformers import HfArgumentParser
 
-import magicoder
+import CluSTER
 
 # DO NOT CHANGE THE FOLLOWING
 SYSTEM = "You are exceptionally skilled at crafting high-quality programming problems and offering precise solutions."
@@ -62,7 +62,7 @@ class Args:
             SYSTEM,
             ERROR_MARGIN,
         )
-        return magicoder.utils.compute_fingerprint(*args, hash_length=5)
+        return CluSTER.utils.compute_fingerprint(*args, hash_length=5)
 
 
 def map_dataset(examples: dict, indices: list[int], args: Args) -> dict:
@@ -111,12 +111,12 @@ def main():
         if args.max_considered_data is not None
         else "train"
     )
-    assert magicoder.utils.OPENAI_CLIENT is not None
+    assert CluSTER.utils.OPENAI_CLIENT is not None
     dataset: Dataset = load_dataset(
         args.dataset_name,
         data_dir=args.data_dir,
         split=split,
-        num_proc=magicoder.utils.N_CORES,
+        num_proc=CluSTER.utils.N_CORES,
     )
     random.seed(args.seed)
     # map_fn = get_map_dataset(args)
@@ -136,14 +136,14 @@ def main():
     dataset = dataset.select(range(start_index, end_index))
 
     prompt_template = Path("data/prompt.txt").read_text()
-    timestamp = magicoder.utils.timestamp()
+    timestamp = CluSTER.utils.timestamp()
     data_fingerprint = args.fingerprint(prompt_template)
     if args.continue_from is not None:
         assert data_fingerprint in args.continue_from, "Fingerprint mismatch"
         assert f"{start_index}_{end_index}" in args.continue_from, "Index mismatch"
         old_path = Path(args.continue_from)
         assert old_path.exists()
-        old_data = magicoder.utils.read_jsonl(old_path)
+        old_data = CluSTER.utils.read_jsonl(old_path)
         assert len(old_data) > 0
         last_index = old_data[-1]["index"]
         n_skipped = last_index - start_index + 1
@@ -167,7 +167,7 @@ def main():
         max_new_tokens = min(
             args.max_new_tokens,
             args.model_max_tokens
-            - magicoder.utils.num_tokens_from_string(prompt, args.model)
+            - CluSTER.utils.num_tokens_from_string(prompt, args.model)
             # error margin (e.g., due to conversation tokens)
             - ERROR_MARGIN,
         )
@@ -178,7 +178,7 @@ def main():
             {"role": "user", "content": prompt},
         ]
         openai_seed = args.seed + example["index"]
-        response = magicoder.utils.chat_completions_with_backoff(
+        response = CluSTER.utils.chat_completions_with_backoff(
             model=args.model,
             messages=messages,
             max_tokens=max_new_tokens,

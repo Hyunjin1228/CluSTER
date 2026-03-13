@@ -9,7 +9,7 @@ from typing import cast
 from tqdm.auto import tqdm
 from transformers import HfArgumentParser
 
-from magicoder.utils import read_jsonl, write_jsonl
+from CluSTER.utils import read_jsonl, write_jsonl
 
 
 @dataclass(frozen=True)

@@ -1,22 +1,27 @@
-import random
 from dataclasses import dataclass, field
 from typing import cast
+from typing import Dict, Optional, Sequence, List
 
+import transformers
 import torch
-from datasets import Dataset, load_dataset
-from tqdm.auto import tqdm
+from datasets import load_dataset
 from transformers import HfArgumentParser, Trainer, TrainingArguments
 
-from magicoder.llm_wrapper import (
+from CluSTER.llm_wrapper import (
     DecodingConfig,
     EncodingConfig,
     TokenizationContext,
     get_model_context,
     pad_sequences,
 )
-from magicoder.prompt_template import MAGICODER_PROMPT
-from magicoder.utils import N_CORES, read_jsonl, write_jsonl
+from CluSTER.prompt_template import MAGICODER_PROMPT
+from CluSTER.utils import N_CORES
+import random
+import numpy as np
+from CluSTER.coreset_trainer import CustomTrainer
+from CluSTER.call_back import SamplerEpochSetterCallback, PruneAndClusteringinwithMeanCallback, UniformCallback
 
+import time
 
 @dataclass(frozen=True)
 class ModelArguments:
@@ -27,60 +32,12 @@ class ModelArguments:
 # Ignored index in CrossEntropyLoss
 IGNORED_INDEX = -100
 
-# "python",
-# "typescript",
-# "csharp",
-# "rust",
-# "swift",
-# "php",
-# "java",
-# "cpp",
-# "shell",
 
-
-def process_data(data: dict, lang: str) -> dict | None:
-    docstring = data["docstring"].strip()
-    if len(docstring) == 0:
-        return None
-    if docstring.count(docstring[0]) == len(docstring):
-        return None
-    code = data["function"].strip()
-    if lang == "python":
-        double_quote_doc = code.count('"""') >= 2
-        single_quote_doc = code.count("'''") >= 2
-        if double_quote_doc:
-            start_index = code.index('"""')
-            end_index = code.index('"""', start_index + 3)
-        elif single_quote_doc:
-            start_index = code.index("'''")
-            end_index = code.index("'''", start_index + 3)
-        else:
-            # print("None..")
-            # print(code)
-            # print("None...")
-            return None
-        prompt = code[: end_index + 3]
-        completion = code[end_index + 3 :]
-    else:
-        prefix = "/// " if lang != "shell" else "### "
-        prompt = "".join(prefix + line for line in docstring.splitlines(keepends=True))
-        codelines = code.splitlines(keepends=True)
-        prompt += "\n" + "".join(codelines[:1])
-        completion = "".join(codelines[1:])
-    # print("[Prompt]", prompt, "[Completion]", completion, sep="\n")
-    # breakpoint()
-    return {"prompt": prompt, "completion": completion}
-
-
-def preprocess(data: list[dict]) -> list[dict]:
-    pairs: list[dict] = []
-    for d in data:
-        functions = d["function"]
-        for function in functions:
-            result = process_data(function, d["lang"])
-            if result is not None:
-                pairs.append(result)
-    return pairs
+def seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def map_dataset(
@@ -88,9 +45,14 @@ def map_dataset(
     args: "Args",
     context: TokenizationContext,
 ) -> dict:
-    prompts = examples["prompt"]
-    completions = examples["completion"]
-    print("[Prompt]", prompts[0], "[Completion]", completions[0], sep="\n")
+    instructions = examples["instruction"]
+    responses = examples["response"]
+
+    prompts = [
+        MAGICODER_PROMPT.format(instruction=instruction, response="")
+        for instruction in instructions
+    ]
+    completions = responses
 
     assert len(prompts) == len(completions)
     prompt_config = EncodingConfig(add_bos=True, add_eos=False)
@@ -170,38 +132,51 @@ def get_data_collator(args: "Args", pad_token_id: int):
 
     return collate
 
+@dataclass
+class TrainingArguments(transformers.TrainingArguments):
+    cache_dir: Optional[str] = field(default=None)
+    optim: str = field(default="adafactor")
+    prune: Optional[str] = field(default="close", metadata={"help": "Type of the Pruner to use."})
+    sampling_type: Optional[str] = field(default="interleaved", metadata={"help": "Type of the Sampler to use."})
+    weight: bool = field(default=True, metadata={"help": "Whether to use weights in coreset selection."})
+    cluster_sizes: List[int] = field(
+        default_factory=lambda: [1,1,1,1],
+        metadata={"help": "Integers for cluster sizes."}
+    )
+    seed: Optional[int] = field(default = 42, metadata={"help": "seed"})
+    ratio: Optional[int] = field(default = 100, metadata={"help": "ratio for coreset selection"})
+    badge_batch: Optional[int] = field(default = 4, metadata={"help": "batch size for badge"})
+    badge_forward_chunk_mult: Optional[int] = field(
+        default=1,
+        metadata={"help": "Multiplier for per-forward BADGE micro-chunk size (higher=faster, more memory)."},
+    )
+    badge_cleanup_interval: Optional[int] = field(
+        default=0,
+        metadata={"help": "Run expensive CUDA cache cleanup every N BADGE sub-batches (0 disables)."},
+    )
+    weight_mode: Optional[str] = field(default="inv")
 
 @dataclass(frozen=True)
 class Args:
-    covered_pairs_path: str
-    all_pairs_path: str
-    n_samples: int = field(default=75197)
-    max_training_seq_length: int = field(default=1024)
+    datafile_paths: list[str] = field(default_factory=list)
+    max_training_seq_length: int = field(default=1216)
     pad_to_max_length: bool = field(default=False)
+    eval_dataset_size: float = field(
+        default=0.05, metadata={"help": "0--1 means ratio, >1 means number of examples"}
+    )
     use_flash_attention: bool = field(default=False)
+    uniform: bool = field(default=False, metadata={"help": "Whether to use uniform sampling instead of coreset selection."})
 
 
-def main():
+def train():
     parser = HfArgumentParser((ModelArguments, TrainingArguments, Args))
     model_args, training_args, args = cast(
         tuple[ModelArguments, TrainingArguments, Args],
         parser.parse_args_into_dataclasses(),
     )
-    data_covered = read_jsonl(args.covered_pairs_path)
-    preprocessed_covered = preprocess(data_covered)
-    print("Length (covered):", len(preprocessed_covered))
-    data_all_except_covered = read_jsonl(args.all_pairs_path)
-    preprocessed_all = preprocess(data_all_except_covered)
-    print("Length (all except coverred):", len(preprocessed_all))
-    random.seed(training_args.seed)
-    preprocessed_all = random.sample(
-        preprocessed_all, k=args.n_samples - len(preprocessed_covered)
-    )
-    all = preprocessed_covered + preprocessed_all
-    assert len(all) == args.n_samples
-    random.shuffle(all)
-    dataset = Dataset.from_list(all, split="train")
-    assert len(dataset) == args.n_samples
+    seed_everything(training_args.seed)
+    dataset = load_dataset("json", data_files=args.datafile_paths, split="train")
+
     model_key = model_args.model_key
     if (model_name_or_path := model_args.model_name_or_path) is None:
         model_name_or_path = model_key
@@ -221,8 +196,22 @@ def main():
     )
     msg = f"#Examples truncated: {sum(train_dataset['exceeding_length'])} / {len(train_dataset)}"
     print(msg)
+    # else:
+    #     train_dataset = dataset
 
-    train_dataset = train_dataset.shuffle(seed=training_args.seed)
+    # Shuffling
+    if training_args.eval_steps is None and training_args.eval_strategy == "no": ##0219 edit
+        train_dataset = train_dataset.shuffle(seed=training_args.seed)
+        eval_dataset = None
+    else:
+        print("Splitting dataset")
+        split_dataset = train_dataset.train_test_split(
+            test_size=args.eval_dataset_size,
+            shuffle=True,
+            seed=training_args.seed,
+        )
+        train_dataset = split_dataset["train"]
+        eval_dataset = split_dataset["test"]
 
     state = get_model_context(
         model_key,
@@ -236,15 +225,52 @@ def main():
     data_collator = get_data_collator(args, state.tokenization_context.pad_token_id)
 
     # neftune_noise_alpha
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=state.model,
         args=training_args,
         train_dataset=train_dataset,
-        # eval_dataset=eval_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
+        tokenizer=state.tokenization_context.tokenizer,
         # eval_dataset=small_eval_dataset,
         # compute_metrics=compute_metrics,
     )
+    print("Using precomputed gradient-based ordering before trainer.train()")
+    trainer.add_callback(SamplerEpochSetterCallback(trainer))
+
+    if args.uniform:
+        print("Building UniformCallback for one-time precompute")
+        precompute_callback = UniformCallback(
+            trainer,
+            dataset=trainer.train_dataset,
+            tokenizer=tokenization_context.tokenizer,
+        )
+    else:
+        print("Building PruneAndClusteringinwithMeanCallback for one-time precompute")
+        precompute_callback = PruneAndClusteringinwithMeanCallback(
+            trainer,
+            dataset=trainer.train_dataset,
+            tokenizer=tokenization_context.tokenizer,
+        )
+
+    start = time.time()
+    # Ensure trainer has initialized sampler object referenced by the callback.
+    trainer.get_train_dataloader()
+
+    # Trigger the callback pipeline once before training starts.
+    if trainer.state.epoch is None:
+        trainer.state.epoch = 0.0
+    start1 = time.time()
+    precompute_callback.on_train_begin(
+        training_args,
+        trainer.state,
+        trainer.control,
+        model=trainer.model,
+    )
+    end = time.time()
+    print("Finished one-time BADGE precompute and sampler ordering in time: ", end-start)
+
+    print("From dataloader to one-time BADGE precompute and sampler ordering in time: ", end-start1)
 
     # NOTE: the checkpoint will override the initialized model
     trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
@@ -254,4 +280,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    train()
