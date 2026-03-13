@@ -1,6 +1,6 @@
 from transformers import TrainerCallback
 from transformers import Trainer
-from magicoder.custom_sampler import CustomDistributedSampler, InterleavedSpecialSampler
+from CluSTER.custom_sampler import CustomDistributedSampler, InterleavedSpecialSampler
 import torch
 import copy
 import numpy as np
