@@ -103,7 +103,6 @@ class RatioInterleavedBatchSampler(Sampler):
             for i in range(self.num_gpus):
                 print(i, len(gpu_groups[i]), len(gpu_groups_range[i]))
 
-        # 셔플
         rng = random.Random(self.seed + self.epoch)
         idx = 0
         for i,r in enumerate(self.ratios):

@@ -65,7 +65,7 @@ class ClusteringAndPruningCallback(TrainerCallback):
 def compute_gradient_diversity(model, batch):
     with torch.no_grad():
         print("copy model")
-        ref_model = copy.deepcopy(model).cpu().eval()  # FSDP에서 안전하게 복사
+        ref_model = copy.deepcopy(model).cpu().eval()
         grads = []
 
         for i in range(batch['input_ids'].size(0)):
@@ -496,7 +496,7 @@ def _kmeans_badge_equalize_interleave(
     print("*** size ratios:", sizes_ratio)
     print("*** min cluster size:", m)
     pruned_ratio = m * ratio // 100
-    # raw_m_adj = max(1, int(m * ratio // 100))   # 최소 1
+    # raw_m_adj = max(1, int(m * ratio // 100))
     # m_adj = min(raw_m_adj, m)   
     m_adj = (pruned_ratio // micro) * micro if drop_last else pruned_ratio
 
