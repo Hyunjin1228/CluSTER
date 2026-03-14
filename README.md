@@ -2,7 +2,7 @@
 
 ## Training
 ```
-accelerate launch -m magicoder.train_grad \
+accelerate launch -m CluSTER.train_grad \
   --model_key codellama/CodeLlama-7b-Python-hf \
   --use_flash_attention True \
   --max_training_seq_length 1214 \
