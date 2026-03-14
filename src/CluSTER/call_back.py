@@ -92,7 +92,6 @@ def compute_gradient_diversity(model, batch):
         return numerator / (denominator + 1e-12)
 
 def _pairwise_sqdist_to_centers(X: np.ndarray, centers: np.ndarray, labels: np.ndarray) -> np.ndarray:
-    # 각 샘플 i에 대해 ||x_i - c_{label_i}||^2
     diffs = X - centers[labels]
     return np.sum(diffs * diffs, axis=1)
 
@@ -119,9 +118,6 @@ def _concat_clusters(trimmed_by_cluster):
     return out
 
 def alpha_fit(before_vec: np.ndarray, after_vec: np.ndarray, eps: float = 1e-12):
-    """
-    before ≈ α * after 최소제곱 α, 재구성오차, 코사인유사도, R^2-like 반환
-    """
     b = np.asarray(before_vec); a = np.asarray(after_vec)
     den = float(np.dot(a, a))
     if den < eps:
@@ -295,7 +291,7 @@ def _kmeans_prune_equalize_interleave(
     drop_last: bool,
     seed: int = 42,
     weight_mode: str = "inv",         # "inv" | "sqrt_inv" | "prop" | "none"
-    normalize_weights: bool = True,   # 평균 1로 정규화(권장)
+    normalize_weights: bool = True,   
     prune_type: str = "far",
     sampling: str = "interleaved",  # "interleaved" | "concat"
     ratio: int = 100,   # 1~100, pruning ratio (% )
@@ -316,7 +312,6 @@ def _kmeans_prune_equalize_interleave(
     centers = km.cluster_centers_
     dists = _pairwise_sqdist_to_centers(embeddings, centers, labels)
 
-    # 클러스터별 정렬(centroid 가까운→먼)
     idxs_by_cluster = [[] for _ in range(world_size)]
     for i, c in enumerate(labels):
         idxs_by_cluster[c].append(i)
@@ -344,7 +339,6 @@ def _kmeans_prune_equalize_interleave(
     pruned_ratio = m * ratio // 100
     m_adj = (pruned_ratio // micro) * micro if drop_last else pruned_ratio
 
-    # ---- (A) 프루닝: 가까운 m_adj개만 유지 ----
     if prune_type == "far":
         print("prune far!!!!")
         trimmed = [lst[:m_adj] for lst in idxs_by_cluster]
@@ -367,20 +361,18 @@ def _kmeans_prune_equalize_interleave(
         grad_norms = np.linalg.norm(embeddings, axis=1)  # (N,)
         trimmed = []
         for lst in idxs_by_cluster:
-            # 해당 클러스터 내에서 gradient norm 기준 오름차순 정렬
             lst_sorted = sorted(lst, key=lambda i: grad_norms[i])
-            # 가장 큰 norm 기준으로 m_adj 개 선택
             trimmed.append(lst_sorted[-m_adj:])
     else:
         raise ValueError(f"unknown prune_type: {prune_type}")
 
-    for idx, chunk in enumerate(trimmed):     # shuffle은 in-place라 루프가 정석
+    for idx, chunk in enumerate(trimmed): 
         rng = random.Random(seed + idx)
         rng.shuffle(chunk)
     if sampling == "interleaved":
         interleaved = _interleave_equal_clusters(trimmed)
     elif sampling == "seq":
-        interleaved = _concat_clusters(trimmed)  # 디버깅용
+        interleaved = _concat_clusters(trimmed) 
     elif sampling == "rand":
         #interleaved = list(range(len(trimmed)))
         interleaved = _concat_clusters(trimmed)
@@ -390,25 +382,6 @@ def _kmeans_prune_equalize_interleave(
         raise ValueError(f"unknown sampling: {sampling}")
     kept = world_size * m_adj
 
-    # cluster_centroids_before = np.stack(
-    #     [X[np.array(idxs_by_cluster[c])].mean(axis=0) for c in range(world_size)]
-    # )
-    # cluster_centroids_after = np.stack(
-    #     [X[np.array(trimmed[c])].mean(axis=0) for c in range(world_size)]
-    # )
-    # cluster_shift_l2 = np.linalg.norm(cluster_centroids_after - cluster_centroids_before, axis=1)
-
-    # alphas, errs, cos_sims, r2s = [], [], [], []
-
-    # for c in range(world_size):
-    #     a, e, cs, r2 = alpha_fit(cluster_centroids_before[c], cluster_centroids_after[c])
-    #     alphas.append(a); errs.append(e); cos_sims.append(cs); r2s.append(r2)
-    # print(f"[Per-cluster] shift L2 by cluster: {cluster_shift_l2.tolist()} (mean={cluster_shift_l2.mean():.6f})")
-
-
-    # ---- (B) 가중치: 프루닝 "전" 사이즈로 계산 ----
-    #   ratios_k = n_k / N
-    #   weight_k: 모드 선택
     ratios = [n / float(N) for n in sizes]
     if prune_type == "none":
         cluster_w = [1.0 for _ in sizes]
@@ -422,13 +395,9 @@ def _kmeans_prune_equalize_interleave(
         cluster_w = ratios[:]
     else:
         raise ValueError(f"unknown weight_mode: {weight_mode}")
-    # cluster_w = a
-    # print("weights: ", a, "cos_sims: ", cos_sims)
 
-    # 인덱스별 가중치 벡터
     w_per_idx = np.asarray([cluster_w[labels[i]] for i in range(N)], dtype=np.float32)
 
-    # 평균 1로 정규화(권장: 학습 스케일 안정)
     if normalize_weights and kept > 0:
         mean_w = w_per_idx[interleaved].mean()
         if mean_w > 0:
@@ -445,7 +414,7 @@ def _kmeans_prune_equalize_interleave(
         "m_adj": m_adj,
         "kept": kept,
         "pruned": N - kept,
-        "labels": labels,    # 필요 시 디버깅/로그용
+        "labels": labels,
         "cluster_size_ratio": sizes_ratio,
     }
     return interleaved, diag, w_per_idx
@@ -493,7 +462,7 @@ def _kmeans_badge_equalize_interleave(
     drop_last: bool,
     seed: int = 42,
     weight_mode: str = "inv",         # "inv" | "sqrt_inv" | "prop"
-    normalize_weights: bool = True,   # 평균 1로 정규화(권장)
+    normalize_weights: bool = True,   
     prune_type: str = "far",
     sampling: str = "interleaved",  # "interleaved" | "concat"
     ratio: int = 100,   # 1~100, pruning ratio (% )
@@ -514,7 +483,6 @@ def _kmeans_badge_equalize_interleave(
     centers = km.cluster_centers_
     dists = _pairwise_sqdist_to_centers(embeddings, centers, labels)
 
-    # 클러스터별 정렬(centroid 가까운→먼)
     idxs_by_cluster = [[] for _ in range(world_size)]
     for i, c in enumerate(labels):
         idxs_by_cluster[c].append(i)
@@ -532,7 +500,6 @@ def _kmeans_badge_equalize_interleave(
     # m_adj = min(raw_m_adj, m)   
     m_adj = (pruned_ratio // micro) * micro if drop_last else pruned_ratio
 
-    # ---- (A) 프루닝: 가까운 m_adj개만 유지 ----
     if prune_type == "far":
         trimmed = [lst[:m_adj] for lst in idxs_by_cluster]
     elif prune_type == "close":
@@ -556,23 +523,21 @@ def _kmeans_badge_equalize_interleave(
             cluster_embs = embeddings[lst]  # subset of embeddings belonging to cluster c
             local_selected = _badge_kcenter_greedy(cluster_embs, m_adj, seed + c)
 
-            # local indices → global indices로 매핑
             global_selected = [lst[i] for i in local_selected]
             trimmed.append(global_selected)
         print("*** done BADGE-style pruning ***")
     else:
         raise ValueError(f"unknown prune_type: {prune_type}")
 
-    for idx, chunk in enumerate(trimmed):     # shuffle은 in-place라 루프가 정석
+    for idx, chunk in enumerate(trimmed):
         rng = random.Random(seed + idx)
         rng.shuffle(chunk)
 
     interleaved = _concat_clusters(trimmed)
-    rng = random.Random(seed) ## 0223
-    rng.shuffle(interleaved) ## 0223
+    rng = random.Random(seed)
+    rng.shuffle(interleaved)
     kept = world_size * m_adj
 
-    # ---- (B) 가중치: 프루닝 "전" 사이즈로 계산 ----
     ratios = [n / float(N) for n in sizes]
     if prune_type == "none":
         cluster_w = [1.0 for _ in sizes]
@@ -588,10 +553,8 @@ def _kmeans_badge_equalize_interleave(
         raise ValueError(f"unknown weight_mode: {weight_mode}")
 
 
-    # 인덱스별 가중치 벡터
     w_per_idx = np.asarray([cluster_w[labels[i]] for i in range(N)], dtype=np.float32)
 
-    # 평균 1로 정규화(권장: 학습 스케일 안정)
     if normalize_weights and kept > 0:
         mean_w = w_per_idx[interleaved].mean()
         if mean_w > 0:
@@ -608,7 +571,7 @@ def _kmeans_badge_equalize_interleave(
         "m_adj": m_adj,
         "kept": kept,
         "pruned": N - kept,
-        "labels": labels,    # 필요 시 디버깅/로그용
+        "labels": labels,
         "cluster_size_ratio": sizes_ratio,
     }
     return interleaved, diag, w_per_idx
@@ -620,7 +583,7 @@ def _kmeans_uniform_equalize_interleave(
     drop_last: bool,
     seed: int = 42,
     weight_mode: str = "inv",         # "inv" | "sqrt_inv" | "prop"
-    normalize_weights: bool = True,   # 평균 1로 정규화(권장)
+    normalize_weights: bool = True,
     prune_type: str = "far",
     sampling: str = "interleaved",  # "interleaved" | "concat"
     ratio: int = 100,   # 1~100, pruning ratio (% )
@@ -641,7 +604,6 @@ def _kmeans_uniform_equalize_interleave(
     centers = km.cluster_centers_
     dists = _pairwise_sqdist_to_centers(embeddings, centers, labels)
 
-    # 클러스터별 정렬(centroid 가까운→먼)
     idxs_by_cluster = [[] for _ in range(world_size)]
     for i, c in enumerate(labels):
         idxs_by_cluster[c].append(i)
@@ -651,18 +613,16 @@ def _kmeans_uniform_equalize_interleave(
     sizes = [len(lst) for lst in idxs_by_cluster]
     print("*** size of each cluster:", sizes)
 
-    m = max(sizes)  # 최대 클러스터 크기
+    m = max(sizes)
     print("*** max cluster size:", m)
 
     sizes_ratio = [size / m for size in sizes]
     print("*** size ratios:", sizes_ratio)
 
-    # max cluster size 기준으로 ratio 적용
     target = m * ratio // 100
     m_adj = (m // micro) * micro if drop_last else m
     print("*** target size per cluster (after ratio & micro):", m_adj)
 
-    # ---- (B) 업샘플링: 각 클러스터를 m_adj까지 랜덤 복제해서 맞추기 ----
     rng = random.Random(seed)
     balanced = []
 
@@ -676,28 +636,25 @@ def _kmeans_uniform_equalize_interleave(
 
         curr_len = len(base)
         if curr_len < m_adj:
-            # 부족한 만큼 랜덤 복제 (with replacement)
             needed = m_adj - curr_len
             extra = [rng.choice(base) for _ in range(needed)]
             new_lst = base + extra
         elif curr_len > m_adj:
-            # 너무 크면 앞에서 m_adj개만 사용 (원하면 random.sample로 변경 가능)
             new_lst = base[:m_adj]
         else:
             new_lst = base
 
         balanced.append(new_lst)
 
-    # balanced가 이제 모든 클러스터가 동일한 길이(m_adj)를 갖도록 upsample된 결과
     print("*** balanced cluster sizes:", [len(lst) for lst in balanced])
 
-    for idx, chunk in enumerate(balanced):     # shuffle은 in-place라 루프가 정석
+    for idx, chunk in enumerate(balanced):
         rng = random.Random(seed + idx)
         rng.shuffle(chunk)
     if sampling == "interleaved":
         interleaved = _interleave_equal_clusters(balanced)
     elif sampling == "seq":
-        interleaved = _concat_clusters(balanced)  # 디버깅용
+        interleaved = _concat_clusters(balanced)
     elif sampling == "rand":
         #interleaved = list(range(len(balanced)))
         interleaved = _concat_clusters(balanced)
@@ -707,15 +664,12 @@ def _kmeans_uniform_equalize_interleave(
         raise ValueError(f"unknown sampling: {sampling}")
     kept = world_size * m_adj
 
-    # ---- (B) 가중치: 프루닝 "전" 사이즈로 계산 ----
     #   ratios_k = n_k / N
-    #   weight_k: 모드 선택
     ratios = [n / float(N) for n in sizes]
     cluster_w = [1.0 for _ in sizes]
 
     w_per_idx = np.asarray([cluster_w[labels[i]] for i in range(N)], dtype=np.float32)
 
-    # 평균 1로 정규화(권장: 학습 스케일 안정)
     if normalize_weights and kept > 0:
         mean_w = w_per_idx[interleaved].mean()
         if mean_w > 0:
@@ -732,7 +686,7 @@ def _kmeans_uniform_equalize_interleave(
         "m_adj": m_adj,
         "kept": kept,
         "pruned": N - kept,
-        "labels": labels,    # 필요 시 디버깅/로그용
+        "labels": labels,
         "cluster_size_ratio": sizes_ratio,
     }
     return interleaved, diag, w_per_idx
@@ -766,18 +720,15 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
 
     # ------------------------- PADDED COLLATE ------------------------- #
     def _get_collate_fn(self):
-        # 1) 학습과 동일한 collate 사용
         collate_fn = getattr(self.trainer, "data_collator", None)
         if collate_fn is not None:
             return collate_fn
 
-        # 2) tokenizer.pad 기반 동적 패딩 collate
         tok = self.tokenizer
         if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
             tok.pad_token_id = tok.eos_token_id
 
         def collate_fn(features):
-            # feature 값이 텐서일 수도 있어 tokenizer.pad가 리스트를 기대하므로 tolist 처리
             proc = []
             for ex in features:
                 ex2 = {}
@@ -788,7 +739,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
                         ex2[k] = v
                 proc.append(ex2)
             batch = tok.pad(proc, return_tensors="pt", padding="longest")
-            # labels 없으면 생성: LM 학습과 동일하게 pad 위치 -100
             if "labels" not in batch:
                 labels = batch["input_ids"].clone()
                 if "attention_mask" in batch:
@@ -806,11 +756,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
     from contextlib import nullcontext
 
     def jvp_proxy_raw(self, model, batch):
-        """
-        kmeans용 proxy embedding (B,H), 정규화 X
-        - vocab 차원 생성 없음 (one_hot/err/einsum 제거)
-        - OOM 방지
-        """
         with torch.inference_mode():
             use_amp = batch["input_ids"].is_cuda
             amp_dtype = (
@@ -819,7 +764,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
                 else torch.float16
             )
 
-            # autocast (deprecated 해결)
             ctx = torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype) if use_amp else nullcontext()
             with ctx:
                 out = model(**batch, output_hidden_states=True)
@@ -833,18 +777,14 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
             lbl = batch["labels"][:, 1:].contiguous()  # (B,T-1)
             mask = (lbl != -100)
 
-            # gather 안전 처리
             lbl_safe = lbl.masked_fill(~mask, 0)
 
-            # 정답 토큰 logprob만 gather: (B,T-1)
             logp = F.log_softmax(logit, dim=-1)
             logp_y = logp.gather(-1, lbl_safe.unsqueeze(-1)).squeeze(-1)
             p_y = logp_y.exp()
 
-            # CE gradient의 정답 클래스 성분: (p_y - 1)
             coeff = (p_y - 1.0) * mask  # (B,T-1)
 
-            # 토큰 축 aggregation -> (B,H)
             denom = mask.sum(dim=1).clamp_min(1).unsqueeze(-1)  # (B,1)
             grad_seq = (coeff.unsqueeze(-1) * h).sum(dim=1) / denom  # (B,H)
 
@@ -859,9 +799,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
 
 
     def jvp_proxy_normalized(self, model, batch):
-        """
-        kmeans용 proxy embedding (B,H), L2 정규화 O
-        """
         grad_seq = self.jvp_proxy_raw(model, batch)
         return F.normalize(grad_seq, dim=1)
 
@@ -878,136 +815,7 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
             e = min(bsz, s + chunk_size)
             yield {k: v[s:e] for k, v in batch.items()}
 
-    # def jvp_proxy_normalized(self, model, batch): # 0222 edit
-    #     with torch.inference_mode():
-    #         use_amp = batch["input_ids"].is_cuda
-    #         amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
 
-    #         with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
-    #             out = model(**batch, output_hidden_states=True)
-    #             h = out.hidden_states[-1]      # (B,T,H)
-    #             logit = out.logits             # (B,T,V)
-
-    #         h = h[..., :-1, :].contiguous()
-    #         logit = logit[..., :-1, :].contiguous()
-
-    #         p = F.softmax(logit, dim=-1)
-
-    #         lbl = batch["labels"][..., 1:].contiguous()
-    #         mask = (lbl != -100)
-
-    #         lbl_safe = lbl.clone()
-    #         lbl_safe[~mask] = 0
-
-    #         one_hot = F.one_hot(lbl_safe, num_classes=p.size(-1)).type_as(p)
-
-    #         err = (p - one_hot)
-    #         err *= mask.unsqueeze(-1)
-
-    #         grad_tok = torch.einsum("btv,bth->bvh", err, h)
-    #         grad_seq = grad_tok.mean(1)
-
-    #         del out, logit, p, one_hot, err, grad_tok, lbl, lbl_safe, mask, h
-    #         _cuda_cleanup(verbose=False)
-
-    #         return F.normalize(grad_seq.float(), dim=1) 
-            
-    # def jvp_proxy_normalized(self, model, batch):
-    #     """
-    #     기존 동작 유지: (B, H) 방향 임베딩 (L2 정규화된 임베딩)
-    #     """
-    #     with torch.no_grad():
-    #         out = model(**batch, output_hidden_states=True)
-    #         h = out.hidden_states[-1]                    # (B,T,H)
-    #         logit = out.logits                           # (B,T,V)
-
-    #     h = h[..., :-1, :]
-    #     p = F.softmax(logit[..., :-1, :], dim=-1)
-    #     lbl = batch["labels"][..., 1:].contiguous()
-
-    #     mask = (lbl != -100)
-    #     lbl_safe = lbl.clone()
-    #     lbl_safe[~mask] = 0
-
-    #     one_hot = F.one_hot(lbl_safe, num_classes=p.size(-1)).type_as(p)
-    #     err = (p - one_hot) * mask.unsqueeze(-1)
-    #     err = err.to(h.dtype)
-
-    #     py = p.gather(-1, lbl_safe.unsqueeze(-1)).squeeze(-1)  # (B,T)
-    #     err_y = (py - 1.0) * mask                              # (B,T)
-    #     grad_seq = torch.einsum("bt,bth->bh", err_y.to(h.dtype), h)  # (B,H)
-    #     grad_seq = grad_seq / (mask.sum(dim=1, keepdim=True).clamp_min(1))  # 길이 정규화
-        
-    #     return F.normalize(grad_seq.float(), dim=1)       # (B,H)
-        # (B,T-1,V) & (B,T-1,H) → vocab축 평균으로 hidden proxy
-        # 0213 edited
-        # grad_tok = torch.einsum("btv,bth->bvh", err, h)   # (B,V,H)
-        # grad_seq = grad_tok.mean(1)                       # (B,H)
-        # return F.normalize(grad_seq.float(), dim=1)       # (B,H)
-
-    # def jvp_proxy_raw(self, model, batch):
-    #     """
-    #     remove_mean용 raw 임베딩: 정규화하지 않고 (B,H) 반환
-    #     """
-    #     # print("in jvp_proxy_raw")
-    #     with torch.no_grad():
-    #         out = model(**batch, output_hidden_states=True)
-    #         # print("in jvp_proxy_raw: got outcome of model")
-    #         h = out.hidden_states[-1]                    # (B,T,H)
-    #         logit = out.logits                           # (B,T,V)
-
-    #     h = h[..., :-1, :]
-    #     p = F.softmax(logit[..., :-1, :], dim=-1)
-    #     lbl = batch["labels"][..., 1:].contiguous()
-
-    #     mask = (lbl != -100)
-    #     lbl_safe = lbl.clone()
-    #     lbl_safe[~mask] = 0
-
-    #     one_hot = F.one_hot(lbl_safe, num_classes=p.size(-1)).type_as(p)
-    #     err = (p - one_hot) * mask.unsqueeze(-1)
-    #     err = err.to(h.dtype)
-
-    #     grad_tok = torch.einsum("btv,bth->bvh", err, h)   # (B,V,H)
-    #     grad_seq = grad_tok.mean(1)                       # (B,H)
-    #     return grad_seq.float()                           # (B,H) raw
-
-    # def jvp_proxy_raw(self, model, batch):
-    #     with torch.inference_mode():
-    #         use_amp = batch["input_ids"].is_cuda
-    #         amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
-
-    #         with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
-    #             out = model(**batch, output_hidden_states=True)
-    #             h = out.hidden_states[-1]      # (B,T,H)
-    #             logit = out.logits             # (B,T,V)
-
-    #         h = h[..., :-1, :].contiguous()
-    #         logit = logit[..., :-1, :].contiguous()
-
-    #         p = F.softmax(logit, dim=-1)
-
-    #         lbl = batch["labels"][..., 1:].contiguous()
-    #         mask = (lbl != -100)
-
-    #         lbl_safe = lbl.clone()
-    #         lbl_safe[~mask] = 0
-
-    #         one_hot = F.one_hot(lbl_safe, num_classes=p.size(-1)).type_as(p)
-
-    #         err = (p - one_hot)
-    #         err *= mask.unsqueeze(-1)
-
-    #         grad_tok = torch.einsum("btv,bth->bvh", err, h)
-    #         grad_seq = grad_tok.mean(1)
-
-    #         del out, logit, p, one_hot, err, grad_tok, lbl, lbl_safe, mask, h
-    #         _cuda_cleanup(verbose=False)
-
-    #         return grad_seq.float()
-
-
-    # ------------------- 임베딩 계산 (remove_mean 반영) -------------- #
     def compute_badge_embeddings(self, model, dataset, batch_size, device, forward_chunk_size=None):
         model.eval()
         num_workers = int(getattr(self.trainer.args, "dataloader_num_workers", 0))
@@ -1022,7 +830,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
         )
 
         if self.remove_mean:
-            # 1) raw 수집 → 2) 전체 mean 계산(DDP면 all-reduce) → 3) mean만 제거
             raw_list = []
             for batch in tqdm(dataloader, desc="Computing BADGE embeddings (raw)"):
                 batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -1033,7 +840,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
                 del batch
             G_raw = torch.cat(raw_list, dim=0).float()       # (N,H)
 
-            # 전역 평균 (DDP면 all_reduce로 전 세계 평균)
             if torch.distributed.is_initialized():
                 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 sum_local = G_raw.to(dev).sum(dim=0, keepdim=True)          # (1,H)
@@ -1045,9 +851,8 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
                 mu = G_raw.mean(dim=0, keepdim=True)
 
             G_centered = (G_raw - mu)                                       # (N,H) mean-removed
-            return G_centered.numpy().astype(np.float32)                     # k-means 입력
+            return G_centered.numpy().astype(np.float32)                     # k-means
         else:
-            # 기존 방식: 배치마다 정규화 임베딩 수집 후 concat
             embs = []
             for batch in tqdm(dataloader, desc="Computing BADGE embeddings"):
                 batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -1071,7 +876,7 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
         ws = dist.get_world_size()
         n_local = torch.tensor([idx_local.numel()], device=device, dtype=torch.long)
         n_list = [torch.zeros_like(n_local) for _ in range(ws)]
-        dist.all_gather(n_list, n_local)  # 각 랭크 길이 수집
+        dist.all_gather(n_list, n_local)
         n_each = [int(t.item()) for t in n_list]
         max_n = max(n_each) if ws > 0 else idx_local.numel()
 
@@ -1118,24 +923,14 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
 
     @staticmethod
     def _shuffle_preserving_mod(order: List[int], ws: int, seed: int) -> List[int]:
-        """
-        전역 인덱스 order를 모듈로 클래스(=rank)별로만 셔플하고,
-        다시 라운드로빈으로 interleave하여 반환.
-        - pos % ws 는 불변
-        - 각 버킷 길이는 그대로라서 drop_last/microbatch 정렬도 유지
-        """
-        # 1) 모듈로 버킷으로 분할
         buckets = [[] for _ in range(ws)]
         for pos, idx in enumerate(order):
             buckets[pos % ws].append(idx)
 
-        # 2) 버킷 내부 셔플(에폭별 결정론적)
         for r in range(ws):
-            rng = random.Random(seed + r)  # rank별 다른 시드(원하면 동일 seed로 바꿔도 됨)
+            rng = random.Random(seed + r)
             rng.shuffle(buckets[r])
 
-        # 3) 다시 interleave (라운드로빈)
-        #    길이가 완전히 동일하지 않아도 안전하게 zip_longest 스타일로 합침
         out = []
         maxlen = max(len(b) for b in buckets) if buckets else 0
         for j in range(maxlen):
@@ -1145,14 +940,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
         return out
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
-        """
-        에폭 시작:
-        - (모든 랭크) 패딩 포함 로컬 서브셋으로 BADGE 임베딩 계산(계산량 동일화)
-        - (all_gather) '실제 인덱스/임베딩'만 모아 rank0에서 전역 정렬
-        - (rank0) KMeans(K=world_size) → 최소크기 프루닝(centroid에서 먼 것 제거)
-        - (rank0) 인터리브 전역 순서, 프루닝 전 클러스터 비율 → broadcast
-        - sampler.update_indices(), rank_weights 저장, DataLoader 재생성
-        """
         trainer = self.trainer
         device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -1163,33 +950,28 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
 
         sampler = getattr(trainer, "_train_sampler_for_callback", None)
         assert sampler is not None and hasattr(sampler, "update_indices"), \
-            "train sampler에 update_indices가 필요합니다."
+            "Need update_indices in train sampler."
 
         model.eval()
 
-        # -------- (1) 각 랭크 로컬 인덱스: strided real + padding to equal size --------
         N   = len(self.dataset)
         ws  = world_size
         r   = rank
         micro = int(args.per_device_train_batch_size)
         chunk_mult = max(1, int(getattr(args, "badge_forward_chunk_mult", 1)))
         base_badge_chunk = micro * max(ws, 1) * chunk_mult
-        drop_last = bool(getattr(args, "dataloader_drop_last", False))  # KMeans 단계에서만 사용
+        drop_last = bool(getattr(args, "dataloader_drop_last", False))
 
         if ws > 1:
-            # 실제(real) 인덱스: r, r+ws, r+2ws, ...
             idx_real = list(range(r, N, ws))
             real_len = len(idx_real)
 
-            # 타겟 길이: 모든 랭크 동일 (선택) 마이크로 배치 배수로 정렬
             target = math.ceil(N / ws)
             target = math.ceil(target / max(micro, 1)) * max(micro, 1)
 
-            # 패딩 값: 마지막 real 인덱스가 있으면 그것, 없으면 N-1
             pad_val = idx_real[-1] if real_len > 0 else max(0, N - 1)
             idx_full = idx_real + [pad_val] * max(0, target - real_len)
 
-            # 이 랭크가 실제로 임베딩을 계산할 서브셋(패딩 포함)
             local_ds = Subset(self.dataset, idx_full)
         else:
             idx_real = list(range(N))
@@ -1197,13 +979,10 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
             target   = N
             local_ds = self.dataset
 
-        # -------- (2) 임베딩 계산: 패딩은 계산하되, gather에는 'real'만 보냄 --------
-        # remove_mean=True는 all-reduce로 전역 평균을 쓰는데, 패딩이 포함되면 평균이 왜곡될 수 있음.
-        # 패딩 모드에서는 임시로 mean 제거를 끄고(raw/normalized 그대로 사용) 이후 KMeans에 투입.
         saved_remove_mean = getattr(self, "remove_mean", False)
         try:
             if ws > 1:
-                self.remove_mean = False  # 패딩 모드: 평균 왜곡 방지
+                self.remove_mean = False
             if args.badge_batch == 1:
                 micro = micro * ws 
             else:
@@ -1218,7 +997,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
         finally:
             self.remove_mean = saved_remove_mean
 
-        # real 부분만 사용하여 gather에 보냄
         if ws > 1:
             emb_local = torch.from_numpy(emb_full_np[:real_len]).to(device=device, dtype=torch.float32)
             idx_send  = torch.tensor(idx_real, dtype=torch.long, device=device)
@@ -1227,23 +1005,19 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
             idx_send  = torch.arange(0, N, dtype=torch.long, device=device)
 
         if ws > 1:
-            # -------- (3) all_gather (가변 길이) --------
-            idx_all = self._gather_varlen_1d(idx_send, device)       # np.int64, 길이 합=N
+            idx_all = self._gather_varlen_1d(idx_send, device)       # np.int64
             emb_all = self._gather_varlen_2d(emb_local, device)      # np.float32, (N, H)
 
-            # -------- (4) rank0에서 전역 정렬 --------
             if r == 0:
                 order   = np.argsort(idx_all)
                 emb_full = emb_all[order]                            # (N, H)
             else:
                 emb_full = None
 
-            # 전 랭크에 전파
             emb = self._broadcast(emb_full, src=0)
         else:
-            emb = emb_full_np                                       # 단일 프로세스
+            emb = emb_full_np                                   
 
-        # -------- (5) rank0: KMeans/프루닝/인터리브 & 비율 계산 --------
         if r == 0:
             interleaved, diag, _ = _kmeans_prune_equalize_interleave(
                 emb,
@@ -1259,19 +1033,10 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
 
             print(diag)
             
-            # 프루닝 "전" 클러스터 비율 → 랭크 가중치(평균 1 정규화)
             ratios = diag.get("cluster_ratios")
             size_ratios = diag.get("cluster_size_ratio")
             cluster_weights = diag.get("cluster_weights")
 
-            ## edited: alpagasus-coreset-ratio-7b
-            # if ratios is None:
-            #     sizes = diag["cluster_sizes"]; total = float(sum(sizes))
-            #     ratios = [s / total for s in sizes]
-            # mean_r = sum(ratios) / max(len(ratios), 1)
-            # rank_weights = [r_ / mean_r for r_ in ratios]
-
-            ## edited: alpagasus-coreset-mean-7b
             sizes = diag["cluster_sizes"]
             total_size = sum(sizes)
             n_gpus = len(sizes)
@@ -1291,7 +1056,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
         else:
             interleaved, diag, rank_weights = None, None, None
 
-        # -------- (6) 결과 브로드캐스트 --------
         interleaved = self._broadcast(interleaved, src=0)   # list[int]
         diag        = self._broadcast(diag,        src=0)   # dict
         rank_weights= self._broadcast(rank_weights, src=0)  # list[float]
@@ -1300,7 +1064,6 @@ class PruneAndClusteringinwithMeanCallback(TrainerCallback):
 
         print(f"Rank {r} after broadcast: got {len(interleaved) if interleaved is not None else 'None'} interleaved indices, diag={diag}, rank_weights={rank_weights}")
 
-        # -------- (7) sampler 갱신 & DataLoader 재생성 --------
         sampler.update_indices(interleaved)
         
         import types
@@ -1335,18 +1098,15 @@ class UniformCallback(TrainerCallback):
 
     # ------------------------- PADDED COLLATE ------------------------- #
     def _get_collate_fn(self):
-        # 1) 학습과 동일한 collate 사용
         collate_fn = getattr(self.trainer, "data_collator", None)
         if collate_fn is not None:
             return collate_fn
 
-        # 2) tokenizer.pad 기반 동적 패딩 collate
         tok = self.tokenizer
         if getattr(tok, "pad_token_id", None) is None and getattr(tok, "eos_token_id", None) is not None:
             tok.pad_token_id = tok.eos_token_id
 
         def collate_fn(features):
-            # feature 값이 텐서일 수도 있어 tokenizer.pad가 리스트를 기대하므로 tolist 처리
             proc = []
             for ex in features:
                 ex2 = {}
@@ -1357,7 +1117,6 @@ class UniformCallback(TrainerCallback):
                         ex2[k] = v
                 proc.append(ex2)
             batch = tok.pad(proc, return_tensors="pt", padding="longest")
-            # labels 없으면 생성: LM 학습과 동일하게 pad 위치 -100
             if "labels" not in batch:
                 labels = batch["input_ids"].clone()
                 if "attention_mask" in batch:
@@ -1371,82 +1130,9 @@ class UniformCallback(TrainerCallback):
 
         return collate_fn
 
-    # ------------------------- BADGE PROXY --------------------------- #
-    # def jvp_proxy_normalized(self, model, batch):
-    #     with torch.inference_mode():
-    #         use_amp = batch["input_ids"].is_cuda
-    #         amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
-
-    #         with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
-    #             out = model(**batch, output_hidden_states=True)
-    #             h = out.hidden_states[-1]      # (B,T,H)
-    #             logit = out.logits             # (B,T,V)
-
-    #         h = h[..., :-1, :].contiguous()
-    #         logit = logit[..., :-1, :].contiguous()
-
-    #         p = F.softmax(logit, dim=-1)
-
-    #         lbl = batch["labels"][..., 1:].contiguous()
-    #         mask = (lbl != -100)
-
-    #         lbl_safe = lbl.clone()
-    #         lbl_safe[~mask] = 0
-
-    #         one_hot = F.one_hot(lbl_safe, num_classes=p.size(-1)).type_as(p)
-
-    #         err = (p - one_hot)
-    #         err *= mask.unsqueeze(-1)
-
-    #         grad_tok = torch.einsum("btv,bth->bvh", err, h)
-    #         grad_seq = grad_tok.mean(1)
-
-    #         del out, logit, p, one_hot, err, grad_tok, lbl, lbl_safe, mask, h
-    #         _cuda_cleanup(verbose=False)
-
-    #         return F.normalize(grad_seq.float(), dim=1) 
-            
-    # def jvp_proxy_raw(self, model, batch):
-    #     with torch.inference_mode():
-    #         use_amp = batch["input_ids"].is_cuda
-    #         amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
-
-    #         with torch.cuda.amp.autocast(enabled=use_amp, dtype=amp_dtype):
-    #             out = model(**batch, output_hidden_states=True)
-    #             h = out.hidden_states[-1]      # (B,T,H)
-    #             logit = out.logits             # (B,T,V)
-
-    #         h = h[..., :-1, :].contiguous()
-    #         logit = logit[..., :-1, :].contiguous()
-
-    #         p = F.softmax(logit, dim=-1)
-
-    #         lbl = batch["labels"][..., 1:].contiguous()
-    #         mask = (lbl != -100)
-
-    #         lbl_safe = lbl.clone()
-    #         lbl_safe[~mask] = 0
-
-    #         one_hot = F.one_hot(lbl_safe, num_classes=p.size(-1)).type_as(p)
-
-    #         err = (p - one_hot)
-    #         err *= mask.unsqueeze(-1)
-
-    #         grad_tok = torch.einsum("btv,bth->bvh", err, h)
-    #         grad_seq = grad_tok.mean(1)
-
-    #         del out, logit, p, one_hot, err, grad_tok, lbl, lbl_safe, mask, h
-    #         _cuda_cleanup(verbose=False)
-
-    #         return grad_seq.float()
     from contextlib import nullcontext
 
     def jvp_proxy_raw(self, model, batch):
-        """
-        kmeans용 proxy embedding (B,H), 정규화 X
-        - vocab 차원 생성 없음 (one_hot/err/einsum 제거)
-        - OOM 방지
-        """
         with torch.inference_mode():
             use_amp = batch["input_ids"].is_cuda
             amp_dtype = (
@@ -1455,7 +1141,6 @@ class UniformCallback(TrainerCallback):
                 else torch.float16
             )
 
-            # autocast (deprecated 해결)
             ctx = torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype) if use_amp else nullcontext()
             with ctx:
                 out = model(**batch, output_hidden_states=True)
@@ -1469,18 +1154,17 @@ class UniformCallback(TrainerCallback):
             lbl = batch["labels"][:, 1:].contiguous()  # (B,T-1)
             mask = (lbl != -100)
 
-            # gather 안전 처리
             lbl_safe = lbl.masked_fill(~mask, 0)
 
-            # 정답 토큰 logprob만 gather: (B,T-1)
+            # (B,T-1)
             logp = F.log_softmax(logit, dim=-1)
             logp_y = logp.gather(-1, lbl_safe.unsqueeze(-1)).squeeze(-1)
             p_y = logp_y.exp()
 
-            # CE gradient의 정답 클래스 성분: (p_y - 1)
+            # (p_y - 1)
             coeff = (p_y - 1.0) * mask  # (B,T-1)
 
-            # 토큰 축 aggregation -> (B,H)
+            # (B,H)
             denom = mask.sum(dim=1).clamp_min(1).unsqueeze(-1)  # (B,1)
             grad_seq = (coeff.unsqueeze(-1) * h).sum(dim=1) / denom  # (B,H)
 
@@ -1495,86 +1179,9 @@ class UniformCallback(TrainerCallback):
 
 
     def jvp_proxy_normalized(self, model, batch):
-        """
-        kmeans용 proxy embedding (B,H), L2 정규화 O
-        """
         grad_seq = self.jvp_proxy_raw(model, batch)
         return F.normalize(grad_seq, dim=1)
         
-    # def jvp_proxy_normalized(self, model, batch):
-    #     with torch.inference_mode():
-    #         use_amp = batch["input_ids"].is_cuda
-    #         amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
-
-    #         # FutureWarning 해결 (권장)
-    #         ctx = torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype) if use_amp else nullcontext()
-    #         with ctx:
-    #             out = model(**batch, output_hidden_states=True)
-    #             h = out.hidden_states[-1]   # (B,T,H)
-    #             logit = out.logits          # (B,T,V)
-
-    #         # shift: predict token t+1 from position t
-    #         h = h[:, :-1, :].contiguous()         # (B,T-1,H)
-    #         logit = logit[:, :-1, :].contiguous() # (B,T-1,V)
-
-    #         lbl = batch["labels"][:, 1:].contiguous()  # (B,T-1)
-    #         mask = (lbl != -100)
-
-    #         # 안전 gather: -100 자리는 0으로 치환
-    #         lbl_safe = lbl.masked_fill(~mask, 0)
-
-    #         # 정답 토큰의 log-prob만 뽑기: (B,T-1)
-    #         logp = F.log_softmax(logit, dim=-1)
-    #         logp_y = logp.gather(-1, lbl_safe.unsqueeze(-1)).squeeze(-1)
-    #         p_y = logp_y.exp()
-
-    #         # (p_y - 1): CE gradient의 정답 클래스 성분
-    #         coeff = (p_y - 1.0) * mask   # (B,T-1)
-
-    #         # 토큰 방향으로 aggregation -> (B,H)
-    #         denom = mask.sum(dim=1).clamp_min(1).unsqueeze(-1)  # (B,1)
-    #         grad_seq = (coeff.unsqueeze(-1) * h).sum(dim=1) / denom
-
-    #         # 정리
-    #         del out, logit, logp, logp_y, p_y, lbl, lbl_safe, mask, h, coeff, denom
-    #         _cuda_cleanup(verbose=False)
-
-    #         return F.normalize(grad_seq.float(), dim=1)
-
-    # def jvp_proxy_raw(self, model, batch):
-    #     with torch.inference_mode():
-    #         use_amp = batch["input_ids"].is_cuda
-    #         amp_dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float16
-
-    #         with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
-    #             out = model(**batch, output_hidden_states=True)
-    #             h = out.hidden_states[-1]   # (B,T,H)
-    #             logit = out.logits          # (B,T,V)
-
-    #         h = h[:, :-1, :].contiguous()         # (B,T-1,H)
-    #         logit = logit[:, :-1, :].contiguous() # (B,T-1,V)
-
-    #         lbl = batch["labels"][:, 1:].contiguous()  # (B,T-1)
-    #         mask = (lbl != -100)
-    #         lbl_safe = lbl.masked_fill(~mask, 0)
-
-    #         logp = F.log_softmax(logit, dim=-1)
-    #         logp_y = logp.gather(-1, lbl_safe.unsqueeze(-1)).squeeze(-1)
-    #         p_y = logp_y.exp()
-
-    #         coeff = (p_y - 1.0) * mask  # (B,T-1)
-
-    #         denom = mask.sum(dim=1).clamp_min(1).unsqueeze(-1)  # (B,1)
-    #         grad_seq = (coeff.unsqueeze(-1) * h).sum(dim=1) / denom   # (B,H)
-
-    #         del out, logit, logp, logp_y, p_y, lbl, lbl_safe, mask, h, coeff, denom
-    #         if self.badge_cleanup_interval > 0:
-    #             self._badge_cleanup_step += 1
-    #             if (self._badge_cleanup_step % self.badge_cleanup_interval) == 0:
-    #                 _cuda_cleanup(verbose=False)
-
-    #         return grad_seq.float()
-
     @staticmethod
     def _split_batch(batch, chunk_size):
         if chunk_size is None or chunk_size <= 0:
@@ -1588,7 +1195,6 @@ class UniformCallback(TrainerCallback):
             e = min(bsz, s + chunk_size)
             yield {k: v[s:e] for k, v in batch.items()}
 
-    # ------------------- 임베딩 계산 (remove_mean 반영) -------------- #
     def compute_badge_embeddings(self, model, dataset, batch_size, device, forward_chunk_size=None):
         model.eval()
         num_workers = int(getattr(self.trainer.args, "dataloader_num_workers", 0))
@@ -1603,7 +1209,6 @@ class UniformCallback(TrainerCallback):
         )
 
         if self.remove_mean:
-            # 1) raw 수집 → 2) 전체 mean 계산(DDP면 all-reduce) → 3) mean만 제거
             raw_list = []
             for batch in tqdm(dataloader, desc="Computing BADGE embeddings (raw)"):
                 batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -1614,7 +1219,6 @@ class UniformCallback(TrainerCallback):
                 del batch
             G_raw = torch.cat(raw_list, dim=0).float()       # (N,H)
 
-            # 전역 평균 (DDP면 all_reduce로 전 세계 평균)
             if torch.distributed.is_initialized():
                 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
                 sum_local = G_raw.to(dev).sum(dim=0, keepdim=True)          # (1,H)
@@ -1626,9 +1230,8 @@ class UniformCallback(TrainerCallback):
                 mu = G_raw.mean(dim=0, keepdim=True)
 
             G_centered = (G_raw - mu)                                       # (N,H) mean-removed
-            return G_centered.numpy().astype(np.float32)                     # k-means 입력
+            return G_centered.numpy().astype(np.float32)                     # k-means
         else:
-            # 기존 방식: 배치마다 정규화 임베딩 수집 후 concat
             embs = []
             for batch in tqdm(dataloader, desc="Computing BADGE embeddings"):
                 batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -1652,7 +1255,7 @@ class UniformCallback(TrainerCallback):
         ws = dist.get_world_size()
         n_local = torch.tensor([idx_local.numel()], device=device, dtype=torch.long)
         n_list = [torch.zeros_like(n_local) for _ in range(ws)]
-        dist.all_gather(n_list, n_local)  # 각 랭크 길이 수집
+        dist.all_gather(n_list, n_local)
         n_each = [int(t.item()) for t in n_list]
         max_n = max(n_each) if ws > 0 else idx_local.numel()
 
@@ -1699,24 +1302,14 @@ class UniformCallback(TrainerCallback):
 
     @staticmethod
     def _shuffle_preserving_mod(order: List[int], ws: int, seed: int) -> List[int]:
-        """
-        전역 인덱스 order를 모듈로 클래스(=rank)별로만 셔플하고,
-        다시 라운드로빈으로 interleave하여 반환.
-        - pos % ws 는 불변
-        - 각 버킷 길이는 그대로라서 drop_last/microbatch 정렬도 유지
-        """
-        # 1) 모듈로 버킷으로 분할
         buckets = [[] for _ in range(ws)]
         for pos, idx in enumerate(order):
             buckets[pos % ws].append(idx)
 
-        # 2) 버킷 내부 셔플(에폭별 결정론적)
         for r in range(ws):
-            rng = random.Random(seed + r)  # rank별 다른 시드(원하면 동일 seed로 바꿔도 됨)
+            rng = random.Random(seed + r)  
             rng.shuffle(buckets[r])
 
-        # 3) 다시 interleave (라운드로빈)
-        #    길이가 완전히 동일하지 않아도 안전하게 zip_longest 스타일로 합침
         out = []
         maxlen = max(len(b) for b in buckets) if buckets else 0
         for j in range(maxlen):
@@ -1726,14 +1319,6 @@ class UniformCallback(TrainerCallback):
         return out
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
-        """
-        에폭 시작:
-        - (모든 랭크) 패딩 포함 로컬 서브셋으로 BADGE 임베딩 계산(계산량 동일화)
-        - (all_gather) '실제 인덱스/임베딩'만 모아 rank0에서 전역 정렬
-        - (rank0) KMeans(K=world_size) → 최소크기 프루닝(centroid에서 먼 것 제거)
-        - (rank0) 인터리브 전역 순서, 프루닝 전 클러스터 비율 → broadcast
-        - sampler.update_indices(), rank_weights 저장, DataLoader 재생성
-        """
         trainer = self.trainer
         device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -1744,33 +1329,28 @@ class UniformCallback(TrainerCallback):
 
         sampler = getattr(trainer, "_train_sampler_for_callback", None)
         assert sampler is not None and hasattr(sampler, "update_indices"), \
-            "train sampler에 update_indices가 필요합니다."
+            "Need update_indices in train sampler."
 
         model.eval()
 
-        # -------- (1) 각 랭크 로컬 인덱스: strided real + padding to equal size --------
         N   = len(self.dataset)
         ws  = world_size
         r   = rank
         micro = int(args.per_device_train_batch_size)
         chunk_mult = max(1, int(getattr(args, "badge_forward_chunk_mult", 1)))
         base_badge_chunk = micro * max(ws, 1) * chunk_mult
-        drop_last = bool(getattr(args, "dataloader_drop_last", False))  # KMeans 단계에서만 사용
+        drop_last = bool(getattr(args, "dataloader_drop_last", False))
 
         if ws > 1:
-            # 실제(real) 인덱스: r, r+ws, r+2ws, ...
             idx_real = list(range(r, N, ws))
             real_len = len(idx_real)
 
-            # 타겟 길이: 모든 랭크 동일 (선택) 마이크로 배치 배수로 정렬
             target = math.ceil(N / ws)
             target = math.ceil(target / max(micro, 1)) * max(micro, 1)
 
-            # 패딩 값: 마지막 real 인덱스가 있으면 그것, 없으면 N-1
             pad_val = idx_real[-1] if real_len > 0 else max(0, N - 1)
             idx_full = idx_real + [pad_val] * max(0, target - real_len)
 
-            # 이 랭크가 실제로 임베딩을 계산할 서브셋(패딩 포함)
             local_ds = Subset(self.dataset, idx_full)
         else:
             idx_real = list(range(N))
@@ -1778,13 +1358,10 @@ class UniformCallback(TrainerCallback):
             target   = N
             local_ds = self.dataset
 
-        # -------- (2) 임베딩 계산: 패딩은 계산하되, gather에는 'real'만 보냄 --------
-        # remove_mean=True는 all-reduce로 전역 평균을 쓰는데, 패딩이 포함되면 평균이 왜곡될 수 있음.
-        # 패딩 모드에서는 임시로 mean 제거를 끄고(raw/normalized 그대로 사용) 이후 KMeans에 투입.
         saved_remove_mean = getattr(self, "remove_mean", False)
         try:
             if ws > 1:
-                self.remove_mean = False  # 패딩 모드: 평균 왜곡 방지
+                self.remove_mean = False
             micro = micro * ws * 4
             emb_full_np = self.compute_badge_embeddings(
                 model,
@@ -1796,7 +1373,6 @@ class UniformCallback(TrainerCallback):
         finally:
             self.remove_mean = saved_remove_mean
 
-        # real 부분만 사용하여 gather에 보냄
         if ws > 1:
             emb_local = torch.from_numpy(emb_full_np[:real_len]).to(device=device, dtype=torch.float32)
             idx_send  = torch.tensor(idx_real, dtype=torch.long, device=device)
@@ -1805,23 +1381,19 @@ class UniformCallback(TrainerCallback):
             idx_send  = torch.arange(0, N, dtype=torch.long, device=device)
 
         if ws > 1:
-            # -------- (3) all_gather (가변 길이) --------
-            idx_all = self._gather_varlen_1d(idx_send, device)       # np.int64, 길이 합=N
+            idx_all = self._gather_varlen_1d(idx_send, device)       # np.int64
             emb_all = self._gather_varlen_2d(emb_local, device)      # np.float32, (N, H)
 
-            # -------- (4) rank0에서 전역 정렬 --------
             if r == 0:
                 order   = np.argsort(idx_all)
                 emb_full = emb_all[order]                            # (N, H)
             else:
                 emb_full = None
 
-            # 전 랭크에 전파
             emb = self._broadcast(emb_full, src=0)
         else:
-            emb = emb_full_np                                       # 단일 프로세스
+            emb = emb_full_np                                       
 
-        # -------- (5) rank0: KMeans/프루닝/인터리브 & 비율 계산 --------
         if r == 0:
             interleaved, diag, _ = _kmeans_uniform_equalize_interleave(
                 emb,
@@ -1834,10 +1406,7 @@ class UniformCallback(TrainerCallback):
                 ratio = args.ratio,
             )
             kept = len(interleaved)
-
-            print(diag)
             
-            # 프루닝 "전" 클러스터 비율 → 랭크 가중치(평균 1 정규화)
             ratios = diag.get("cluster_ratios")
             size_ratios = diag.get("cluster_size_ratio")
             cluster_weights = diag.get("cluster_weights")
@@ -1847,7 +1416,6 @@ class UniformCallback(TrainerCallback):
         else:
             interleaved, diag, rank_weights = None, None, None
 
-        # -------- (6) 결과 브로드캐스트 --------
         interleaved = self._broadcast(interleaved, src=0)   # list[int]
         diag        = self._broadcast(diag,        src=0)   # dict
         rank_weights= self._broadcast(rank_weights, src=0)  # list[float]
@@ -1856,7 +1424,6 @@ class UniformCallback(TrainerCallback):
 
         print(f"Rank {r} after broadcast: got {len(interleaved) if interleaved is not None else 'None'} interleaved indices, diag={diag}, rank_weights={rank_weights}")
 
-        # -------- (7) sampler 갱신 & DataLoader 재생성 --------
         sampler.update_indices(interleaved)
         
         import types

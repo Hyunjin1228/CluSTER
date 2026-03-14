@@ -43,10 +43,7 @@ def chunked(seq: Sequence[_T], n: int) -> Iterable[Sequence[_T]]:
     return (seq[i : i + n] for i in range(0, len(seq), n))
 
 
-# OpenAI API access
-# Use environment variables!
-# openai.organization = "org-pQ4H2mEb8OUHqSkIkP8b50k6"
-# openai.api_key = os.getenv("OPENAI_API_KEY")
+
 
 
 def retry_with_exponential_backoff(

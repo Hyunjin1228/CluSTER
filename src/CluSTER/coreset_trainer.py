@@ -266,7 +266,6 @@ def _is_peft_model(model):
 
 
 def _get_fsdp_ckpt_kwargs():
-    # TODO: @AjayP13, @younesbelkada replace this check with version check at the next `accelerate` release
     if is_accelerate_available() and "adapter_only" in list(inspect.signature(save_fsdp_model).parameters):
         return {"adapter_only": True}
     else:
@@ -399,11 +398,7 @@ class CustomTrainer(Trainer):
         
         # Build the sampler.
         return DistributedStridedSampler(self.train_dataset, pad_to_equal_size=True, sampling = self.args.sampling_type, seed=self.args.seed)
-        # return NewSequentialSampler(self.train_dataset)
-        #return DistributedStridedSampler(self.train_dataset, shuffle=False, pad_to_equal_size=True)
-        #return CustomSequentialSampler(self.train_dataset, per_device_train_batch_size=self.args.per_device_train_batch_size, seed=self.args.seed) 
-        #return RatioInterleavedBatchSampler(self.train_dataset, ratios=self.args.ratio, per_device_train_batch_size=self.args.per_device_train_batch_size, seed=self.args.seed)
-        #return InterleavedSpecialSampler(self.train_dataset, N=4, seed=42, partition=self.args.partition)
+
         if self.args.group_by_length:
             if is_datasets_available() and isinstance(self.train_dataset, datasets.Dataset):
                 lengths = (
@@ -467,59 +462,6 @@ class CustomTrainer(Trainer):
         print("in line 450", type(self._get_train_sampler()))
         return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
     
-    # def compute_loss(self, model, inputs, return_outputs=False):
-    #     """
-    #     How the loss is computed by Trainer. By default, all models return the loss in the first element.
-
-    #     Subclass and override for custom behavior.
-    #     """
-    #     if self.label_smoother is not None and "labels" in inputs:
-    #         labels = inputs.pop("labels")
-    #     else:
-    #         labels = None
-    #     outputs = model(**inputs)
-    #     # Save past state if it exists
-    #     # TODO: this needs to be fixed and made cleaner later.
-    #     if self.args.past_index >= 0:
-    #         self._past = outputs[self.args.past_index]
-
-    #     if labels is not None:
-    #         unwrapped_model = self.accelerator.unwrap_model(model)
-    #         if _is_peft_model(unwrapped_model):
-    #             model_name = unwrapped_model.base_model.model._get_name()
-    #         else:
-    #             model_name = unwrapped_model._get_name()
-    #         if model_name in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
-    #             loss = self.label_smoother(outputs, labels, shift_labels=True)
-    #         else:
-    #             loss = self.label_smoother(outputs, labels)
-    #     else:
-    #         if isinstance(outputs, dict) and "loss" not in outputs:
-    #             raise ValueError(
-    #                 "The model did not return a loss from the inputs, only the following keys: "
-    #                 f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
-    #             )
-    #         # We don't use .loss here since the model may return tuples instead of ModelOutput.
-    #         loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-
-    #     # Edited part
-    #     outputs["raw_loss"] = loss.detach()
-
-    #     # 빠른 경로: 캐시된 텐서가 있으면 그대로 사용
-    #     if hasattr(self, "_rank_weight_tensor"):
-    #         w = self._rank_weight_tensor[self.accelerator.process_index]
-    #         w = w.to(loss.device, dtype=loss.dtype)
-    #     # fallback: args에 list만 있을 때
-    #     elif hasattr(self.args, "rank_weights") and self.args.rank_weights is not None:
-    #         w = torch.tensor(float(self.args.rank_weights[self.accelerator.process_index]),
-    #                         device=loss.device, dtype=loss.dtype)
-    #     else:
-    #         w = torch.tensor(1.0, device=loss.device, dtype=loss.dtype)
-
-    #     print("weight: ", w)
-    #     loss = loss * w
-    #     return (loss, outputs) if return_outputs else loss
-
     def compute_loss(
         self,
         model: nn.Module,
@@ -609,11 +551,10 @@ class CustomTrainer(Trainer):
         # Edited part
         # outputs["raw_loss"] = loss.detach()
 
-        # 빠른 경로: 캐시된 텐서가 있으면 그대로 사용
         if hasattr(self, "_rank_weight_tensor"):
             w = self._rank_weight_tensor[self.accelerator.process_index]
             w = w.to(loss.device, dtype=loss.dtype)
-        # fallback: args에 list만 있을 때
+
         elif hasattr(self.args, "rank_weights") and self.args.rank_weights is not None:
             w = torch.tensor(float(self.args.rank_weights[self.accelerator.process_index]),
                             device=loss.device, dtype=loss.dtype)

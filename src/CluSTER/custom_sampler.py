@@ -89,7 +89,6 @@ class RatioInterleavedBatchSampler(Sampler):
         self.epoch = epoch
 
     def __iter__(self):
-        # 그룹 나누기
         groups = [[] for _ in range(self.num_groups)]
         gpu_groups = [[] for _ in range(self.num_gpus)]
         gpu_groups_range = [[] for _ in range(self.num_gpus)]
@@ -133,12 +132,6 @@ class RatioInterleavedBatchSampler(Sampler):
 
         groups = sorted_groups
         
-        ## general shuffling > random
-        # for g in groups:
-        #     print(len(g))
-        #     rng.shuffle(g)
-
-        # 가능한 최대 step 수 계산
         min_steps = self.total_size // self.batch_size
 
         pointers = [0] * self.num_groups
@@ -184,10 +177,8 @@ class RangeSequentialSampler(torch.utils.data.Sampler):
         self.world_size = world_size
         self.num_samples = len(dataset)
 
-        # chunk size: dataset 길이 나누기 GPU 개수 (몫, 나머지 고려)
         self.chunk_size = math.ceil(self.num_samples / self.world_size)
 
-        # chunk 단위로 인덱스 나누고 concat
         self.indices = []
         for i in range(self.world_size):
             start = i * self.chunk_size
@@ -257,12 +248,7 @@ class InterleavedSpecialSampler(Sampler):
 
 
 class DistributedStridedSampler(Sampler):
-    """
-    전역 순서에서 rank 오프셋으로 시작해 world_size 간격으로 뽑는 샘플러.
-    - update_indices(): 전역 순서를 외부에서 완전히 교체 (프루닝/인터리브 등)
-    - set_active_subset(): 전역 순서 중 일부만 사용
-    - set_epoch(): (선택) epoch별 셔플
-    """
+
     def __init__(
         self,
         dataset,
@@ -291,38 +277,25 @@ class DistributedStridedSampler(Sampler):
         self.prepartitioned = prepartitioned
         self.sampling = sampling
 
-        # 전역 기본 순서(외부 재정렬의 베이스). 기본은 0..N-1
         self._base_order = list(range(self.N))
-        # 활성 서브셋(None이면 전체 사용). 값이 있으면 _base_order의 인덱스가 아니라
-        # "데이터셋 글로벌 인덱스" 리스트를 직접 담는다.
         self._active = None
-        # 현재 에폭에서 실제로 사용할 전역 순서
         self._order = list(self._base_order)
 
         self._build_local_indices()
 
     @staticmethod
     def _shuffle_preserving_mod(order, ws: int, seed: int):
-        """
-        전역 순서 order를 모듈로(ws) 버킷별로만 셔플한 뒤,
-        다시 interleave(라운드로빈)로 합쳐서 반환.
-        - pos % ws 는 불변
-        - 버킷 길이 달라도 안전하게 병합
-        """
         if ws <= 1 or not order:
             return list(order)
 
-        # 1) 버킷 분할 (현재 전역 pos 기준)
         buckets = [[] for _ in range(ws)]
         for pos, idx in enumerate(order):
             buckets[pos % ws].append(idx)
 
-        # 2) 버킷 내부 셔플(결정론)
         for r in range(ws):
             rng = random.Random(seed + r)
             rng.shuffle(buckets[r])
 
-        # 3) 라운드로빈 병합
         out = []
         maxlen = max(len(b) for b in buckets) if buckets else 0
         for j in range(maxlen):
@@ -348,24 +321,18 @@ class DistributedStridedSampler(Sampler):
 
 
     def _build_local_indices(self):
-        # 전역 순서 구성
         self._rebuild_order_for_epoch()
-        N_eff = len(self._order)                     # ★ 프루닝/인터리브 반영된 길이
+        N_eff = len(self._order)                
 
-        # 등간격 선택
         if self.prepartitioned:
-            # rng = random.Random(self.seed + self.epoch)
-            # rng.shuffle(self._order)
             local = list(self._order)
         else:
             local = self._order[self.rank:N_eff:self.ws]
 
-        # drop_last: floor(N_eff/ws)
         if self.drop_last and not self.prepartitioned:
             target = N_eff // self.ws
             local = local[:target]
 
-        # pad_to_equal_size: ceil(N_eff/ws)
         if self.pad_to_equal_size and not self.prepartitioned:
             target = math.ceil(N_eff / self.ws) if self.ws > 0 else len(local)
             if len(local) == 0:
@@ -382,26 +349,19 @@ class DistributedStridedSampler(Sampler):
         self._build_local_indices()
 
     def update_indices(self, new_global_order):
-        """
-        프루닝/인터리브 결과로 바뀐 '전역 순서'를 그대로 반영 (가변 길이 허용).
-        """
-        # ★ assert 제거
         if not new_global_order:
             self._base_order = list(range(self.N))  # fallback
         else:
             self._base_order = list(map(int, new_global_order))
-        self._active = None                         # 전역 교체이므로 subset 해제
+        self._active = None                         
         self._build_local_indices()
 
     def set_active_subset(self, active_global_indices):
-        """
-        전역 순서 일부만 임시 사용하고 싶을 때 (원 전역 순서 유지).
-        """
         self._active = None if active_global_indices is None else list(map(int, active_global_indices))
         self._build_local_indices()
 
     def __len__(self):
-        return len(self._local)                     # ★ 현 랭크가 실제로 순회할 길이
+        return len(self._local)          
     
     def __iter__(self):
         # print(self._local)
